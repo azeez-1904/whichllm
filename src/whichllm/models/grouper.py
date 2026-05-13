@@ -98,12 +98,28 @@ def group_models(models: list[ModelInfo]) -> list[ModelFamily]:
         if not group:
             continue
 
-        # Pick the base model: prefer the one with most downloads that has no GGUF suffix
-        base_candidates = [
-            m for m in group if not m.gguf_variants or m.base_model is None
-        ]
-        if not base_candidates:
-            base_candidates = group
+        # Pick the base model. Priority order:
+        #   1. Models that are referenced by another group member's base_model
+        #      field — these are upstream of the others, so they are the
+        #      true base even when a downstream fine-tune (e.g.
+        #      prefeitura-rio/Rio-3.0-Open-Mini) has more downloads than the
+        #      official base (Qwen/Qwen3-4B-Thinking-2507).
+        #   2. Models without GGUF/quant suffixes and no base_model of their
+        #      own (the original checkpoint).
+        #   3. Anything left in the group.
+        # Within the chosen tier, pick highest downloads as a tiebreaker.
+        referenced_as_base: set[str] = {
+            m.base_model for m in group if m.base_model
+        }
+        upstream_candidates = [m for m in group if m.id in referenced_as_base]
+        if upstream_candidates:
+            base_candidates = upstream_candidates
+        else:
+            base_candidates = [
+                m for m in group if not m.gguf_variants or m.base_model is None
+            ]
+            if not base_candidates:
+                base_candidates = group
 
         base = max(base_candidates, key=lambda m: m.downloads)
         variants = [m for m in group if m.id != base.id]
