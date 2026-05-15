@@ -14,36 +14,36 @@ from whichllm.models.types import GGUFVariant, ModelInfo
 # throughput because the dequantization kernel is fast and weight reads
 # dominate; 8-bit and FP16 drop because more compute is required per byte.
 _QUANT_EFFICIENCY: dict[str, float] = {
-    "F32":     0.30,
-    "F16":     0.40,
-    "BF16":    0.40,
-    "Q8_0":    0.45,
-    "Q6_K":    0.50,
-    "Q5_K_M":  0.52,
-    "Q5_K_S":  0.52,
-    "Q5_0":    0.50,
-    "Q4_K_M":  0.55,
-    "Q4_K_S":  0.55,
-    "Q4_0":    0.53,
-    "Q3_K_M":  0.50,
-    "Q3_K_S":  0.48,
-    "Q3_K_L":  0.50,
-    "Q2_K":    0.45,
-    "IQ4_XS":  0.52,
-    "IQ4_NL":  0.50,
-    "IQ3_S":   0.45,
-    "IQ3_M":   0.45,
-    "IQ3_XS":  0.45,
+    "F32": 0.30,
+    "F16": 0.40,
+    "BF16": 0.40,
+    "Q8_0": 0.45,
+    "Q6_K": 0.50,
+    "Q5_K_M": 0.52,
+    "Q5_K_S": 0.52,
+    "Q5_0": 0.50,
+    "Q4_K_M": 0.55,
+    "Q4_K_S": 0.55,
+    "Q4_0": 0.53,
+    "Q3_K_M": 0.50,
+    "Q3_K_S": 0.48,
+    "Q3_K_L": 0.50,
+    "Q2_K": 0.45,
+    "IQ4_XS": 0.52,
+    "IQ4_NL": 0.50,
+    "IQ3_S": 0.45,
+    "IQ3_M": 0.45,
+    "IQ3_XS": 0.45,
     "IQ3_XXS": 0.42,
-    "IQ2_S":   0.40,
-    "IQ2_M":   0.40,
+    "IQ2_S": 0.40,
+    "IQ2_M": 0.40,
     "IQ2_XXS": 0.38,
-    "IQ1_M":   0.35,
-    "IQ1_S":   0.35,
-    "Q2_0":    0.38,
-    "Q1_0":    0.32,
-    "TQ2_0":   0.35,
-    "TQ1_0":   0.32,
+    "IQ1_M": 0.35,
+    "IQ1_S": 0.35,
+    "Q2_0": 0.38,
+    "Q1_0": 0.32,
+    "TQ2_0": 0.35,
+    "TQ1_0": 0.32,
 }
 
 _DEFAULT_QUANT_EFFICIENCY = 0.45
@@ -53,10 +53,10 @@ _DEFAULT_QUANT_EFFICIENCY = 0.45
 # behind on dequantization; ROCm trails further; older CUDA generations
 # also drop.
 _BACKEND_FACTOR: dict[str, float] = {
-    "nvidia":  1.00,
-    "amd":     0.78,
-    "apple":   0.82,
-    "intel":   0.65,
+    "nvidia": 1.00,
+    "amd": 0.78,
+    "apple": 0.82,
+    "intel": 0.65,
 }
 
 
@@ -124,10 +124,21 @@ def estimate_tok_per_sec(
     # Real-world efficiency depends on quant kernel and backend.
     efficiency = _quant_efficiency(model, variant) * _backend_factor(gpu)
 
-    # Partial offload: weight reads that cross the PCIe bus suffer ~10x
-    # bandwidth drop; assume 40% of the model lives on CPU and the GPU
-    # half completes at full speed.
+    # Partial offload penalty depends on the memory architecture:
+    #
+    # - Discrete GPU (NVIDIA/AMD/Intel): spilled weights live in CPU RAM
+    #   and are read across PCIe at ~1/10th of VRAM bandwidth. With ~40%
+    #   of the model offloaded the blended throughput lands near 0.45x.
+    # - Apple Silicon: GPU and CPU share one physical unified-memory pool.
+    #   "Exceeding VRAM" only means exceeding the recommended working set;
+    #   the bytes are still read from the same high-bandwidth unified RAM,
+    #   so there is no PCIe cliff — only mild OS/cache contention. Using
+    #   the discrete 0.45x here was the bug that made DeepSeek-R1-class
+    #   models on M2/M3 Ultra report ~1.7 t/s when real-world is 4-15.
     if fit_type == "partial_offload":
-        efficiency *= 0.45
+        if gpu.vendor == "apple":
+            efficiency *= 0.85
+        else:
+            efficiency *= 0.45
 
     return theoretical * efficiency
