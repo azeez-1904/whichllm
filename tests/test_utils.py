@@ -21,3 +21,9 @@ def test_cache_dir_falls_back_on_empty_xdg(monkeypatch):
     monkeypatch.setenv("XDG_CACHE_HOME", "")
     result = _cache_dir()
     assert result == Path.home() / ".cache" / "whichllm"
+
+
+def test_cache_dir_ignores_relative_xdg(monkeypatch):
+    monkeypatch.setenv("XDG_CACHE_HOME", "relative/path")
+    result = _cache_dir()
+    assert result == Path.home() / ".cache" / "whichllm"
