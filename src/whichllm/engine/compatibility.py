@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from whichllm.constants import _GiB
 from whichllm.constants import MIN_COMPUTE_CAPABILITY_OLLAMA
+from whichllm.constants import VULKAN_ONLY_GPUS
 from whichllm.engine.quantization import estimate_weight_bytes
 from whichllm.engine.types import CompatibilityResult
 from whichllm.engine.vram import estimate_vram
@@ -19,6 +20,20 @@ def _gpu_available_memory(gpu: GPUInfo, usable_ram: int) -> int:
 
 def _uses_shared_system_pool(gpu: GPUInfo) -> bool:
     return gpu.shared_memory and gpu.vram_bytes < 2 * _GiB
+
+
+def _is_vulkan_only_gpu(gpu: GPUInfo) -> bool:
+    """Return True for legacy NVIDIA GPUs with no modern CUDA support.
+
+    Kepler cards (compute capability 3.x) were dropped by CUDA 12 and current
+    llama.cpp CUDA builds, so they only run through the Vulkan backend. Matches
+    ``VULKAN_ONLY_GPUS`` entries as case-insensitive substrings of the GPU name,
+    the same convention used by the bandwidth/compute-capability lookups.
+    """
+    if gpu.vendor != "nvidia":
+        return False
+    name_upper = gpu.name.upper()
+    return any(marker.upper() in name_upper for marker in VULKAN_ONLY_GPUS)
 
 
 def _fit_candidate_gpus(gpus: list[GPUInfo]) -> list[GPUInfo]:
@@ -71,6 +86,14 @@ def check_compatibility(
                 f"minimum {MIN_COMPUTE_CAPABILITY_OLLAMA} for Ollama"
             )
 
+    # Flag legacy Kepler GPUs that have no CUDA support in modern llama.cpp.
+    # They can still run, but only through the Vulkan backend on Linux.
+    if best_gpu and _is_vulkan_only_gpu(best_gpu):
+        warnings.append(
+            "Legacy Kepler GPU: no CUDA support in modern llama.cpp; "
+            "use the Vulkan backend (Linux) instead"
+        )
+
     # Check ROCm for AMD. Windows AMD users can still use Vulkan/DirectML
     # backends, so do not label the GPU path as unavailable there.
     if (
@@ -88,16 +111,18 @@ def check_compatibility(
     if vram_available >= vram_required:
         fit_type = "full_gpu"
         can_run = True
+        offload_ratio = 0.0
     elif (
         vram_available > 0 and (vram_available + offload_ram_available) >= vram_required
     ):
         fit_type = "partial_offload"
         can_run = True
-        offload_pct = (
-            (vram_required - vram_available) / vram_required * 100
+        offload_ratio = (
+            (vram_required - vram_available) / vram_required
             if vram_required > 0
-            else 0
+            else 0.0
         )
+        offload_pct = offload_ratio * 100
         if best_gpu and (best_gpu.shared_memory or best_gpu.vendor == "apple"):
             warnings.append("Will use shared system memory")
         else:
@@ -107,14 +132,24 @@ def check_compatibility(
     elif usable_ram >= vram_required:
         fit_type = "cpu_only"
         can_run = True
+        offload_ratio = 0.0
         warnings.append("Will run on CPU only (much slower)")
     else:
         fit_type = "cpu_only"
         can_run = False
+        offload_ratio = 0.0
         warnings.append("Insufficient memory (GPU VRAM + RAM) to run this model")
 
     # Context length warning
-    if (
+    context_fits = not (
+        model.context_length is not None and model.context_length < context_length
+    )
+    if not context_fits:
+        warnings.append(
+            f"Model max context {model.context_length} < requested "
+            f"{context_length}; runtime will truncate or reject"
+        )
+    elif (
         context_length > 8192
         and model.context_length
         and model.context_length >= context_length
@@ -135,6 +170,8 @@ def check_compatibility(
         can_run=can_run,
         vram_required_bytes=vram_required,
         vram_available_bytes=vram_available,
+        offload_ratio=offload_ratio,
         warnings=warnings,
         fit_type=fit_type,
+        context_fits=context_fits,
     )
